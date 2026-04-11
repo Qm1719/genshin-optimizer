@@ -57,8 +57,6 @@ import {
   Grid,
   Pagination,
   Skeleton,
-  ToggleButton,
-  Tooltip,
   Typography,
 } from '@mui/material'
 import type { ButtonProps } from '@mui/material/Button'
@@ -119,7 +117,6 @@ export default function TabUpopt() {
   )
 
   const [artifactIdToEdit, setArtifactIdToEdit] = useState<string | undefined>()
-  const [bypassSetExclusion, setBypassSetExclusion] = useState(false)
 
   const activeCharKey = database.teams.getActiveTeamChar(teamId)!.key
 
@@ -315,7 +312,7 @@ export default function TabUpopt() {
       .map((art) => database.arts.get(art.id))
       .filter(notEmpty)
       .filter((art) => art.rarity === 5)
-      .filter((art) => bypassSetExclusion || respectSexExclusion(art))
+      .filter(respectSexExclusion)
       .filter(
         (art) =>
           !mainStatKeys[art.slotKey]?.length ||
@@ -354,7 +351,6 @@ export default function TabUpopt() {
     characterKey,
     filteredArts,
     equippedArts,
-    bypassSetExclusion,
   ])
 
   // Paging logic
@@ -423,34 +419,18 @@ export default function TabUpopt() {
     return data && teamData && { data, teamData }
   }, [data, teamData])
 
-  const pagination = (
+  const pagination = numPages > 1 && (
     <CardThemed bgt="light">
-      <CardContent sx={{ py: '8px !important' }}>
-        <Grid container alignItems="center" spacing={1}>
-          {numPages > 1 && (
-            <Grid item flexGrow={1}>
-              <Pagination
-                count={numPages}
-                page={currentPageIndex + 1}
-                onChange={setPage}
-              />
-            </Grid>
-          )}
-          <Grid item sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Tooltip
-              title="Ignore set restrictions for the upgrader only. Off-set artifacts will appear with a warning badge. Does not affect optimizer settings."
-              placement="top"
-            >
-              <ToggleButton
-                value="bypass"
-                selected={bypassSetExclusion}
-                onChange={() => setBypassSetExclusion((v) => !v)}
-                size="small"
-                color="warning"
-              >
-                All Sets
-              </ToggleButton>
-            </Tooltip>
+      <CardContent>
+        <Grid container>
+          <Grid item flexGrow={1}>
+            <Pagination
+              count={numPages}
+              page={currentPageIndex + 1}
+              onChange={setPage}
+            />
+          </Grid>
+          <Grid item>
             <ShowingArt
               numShowing={indexes.length}
               total={upOptCalc?.artifacts.length ?? 0}
