@@ -1,6 +1,7 @@
 import { cartesian, objMap, range } from '@genshin-optimizer/common/util'
 import type {
   ArtifactRarity,
+  ArtifactSetKey,
   ArtifactSlotKey,
 } from '@genshin-optimizer/gi/consts'
 import { allSubstatKeys, artMaxLevel } from '@genshin-optimizer/gi/consts'
@@ -92,6 +93,13 @@ export type UpOptArtifact = {
   subs: SubstatKey[]
   values: DynStat
   slotKey: ArtifactSlotKey
+  /**
+   * True when this artifact is off-set (different set from the equipped 4-set) AND it is
+   * NOT in the current off-piece slot. The probability/average are still computed as if
+   * it belongs to the 4-set — this flag warns the user that equipping it directly would
+   * break the set bonus and a 2-swap is needed instead.
+   */
+  isOffSetWarning: boolean
 
   result?: UpOptResult
 }
@@ -100,6 +108,17 @@ export type UpOptResult = {
   upAvg: number
   distr: GaussianMixture
   evalMode: ResultType
+}
+export type GuaranteePairResult = {
+  pair: [SubstatKey, SubstatKey]
+  /** Extra expected objective gain (absolute) vs. no-guarantee for the given G */
+  extraAvg: number
+  /** k-score of the pair (scale * grad sum); ranking is independent of G */
+  pairScore: number
+  /** Probability the upgraded artifact beats the current build with this guarantee */
+  p: number
+  /** Expected gain given it improves, with this guarantee */
+  upAvg: number
 }
 type GaussianMixture = {
   gmm: {
@@ -151,6 +170,11 @@ export class UpOptCalculator {
   thresholds: number[]
   calc4th: boolean
 
+  /** The set with 4 pieces in the equipped build, or null for 2-2 / no-set builds. */
+  mainSetKey: ArtifactSetKey | null = null
+  /** The slot whose equipped artifact is the off-piece in a 4-set build. */
+  offPieceSlot: ArtifactSlotKey | null = null
+
   skippableDerivatives: boolean[]
   eval: (
     stats: DynStat,
@@ -180,6 +204,20 @@ export class UpOptCalculator {
     this.nodes = nodes
     this.thresholds = thresholds
     this.calc4th = calc4th
+
+    // Detect 4-set: find a set that appears on exactly 4 of the 5 equipped slots.
+    const setCounts = new Map<string, number>()
+    Object.values(equippedBuild).forEach((art) => {
+      if (art) setCounts.set(art.setKey, (setCounts.get(art.setKey) ?? 0) + 1)
+    })
+    const fourSetEntry = [...setCounts.entries()].find(([, n]) => n >= 4)
+    if (fourSetEntry) {
+      this.mainSetKey = fourSetEntry[0] as ArtifactSetKey
+      this.offPieceSlot =
+        (Object.entries(equippedBuild).find(
+          ([, art]) => art?.setKey !== this.mainSetKey
+        )?.[0] as ArtifactSlotKey) ?? null
+    }
 
     const toEval: OptNode[] = []
     nodes.forEach((n) => {
@@ -233,8 +271,16 @@ export class UpOptCalculator {
       subs: art.substats
         .map(({ key }) => key)
         .filter((v) => v !== '') as SubstatKey[],
+      isOffSetWarning:
+        !!this.mainSetKey &&
+        art.setKey !== this.mainSetKey &&
+        art.slotKey !== this.offPieceSlot,
       values: {
-        [art.setKey]: 1,
+        // In a 4-set build, treat every candidate as belonging to the main set so
+        // the evaluation reflects pure stat value without penalising set membership.
+        // isOffSetWarning tells the UI to flag artifacts that would actually break
+        // the bonus if equipped directly.
+        [this.mainSetKey ?? art.setKey]: 1,
         [art.mainStatKey]: mainStatVal,
         ...Object.fromEntries(
           art.substats
@@ -693,6 +739,64 @@ export class UpOptCalculator {
     })
 
     this.artifacts[ix].result = this._toResultExact(distrs)
+  }
+
+  /**
+   * For each pair of substats, compute the expected objective gain when using the guarantee
+   * mechanic that routes exactly `G` of the N upgrades to the chosen pair (split evenly).
+   * The remaining N-G upgrades are still uniformly random across all 4 substats.
+   *
+   * Uses the linear approximation (same as _calcFast) to derive expected improvement per pair.
+   * Pairs are returned sorted best-first.
+   *
+   * Only meaningful when the artifact has exactly 4 substats.
+   */
+  calcGuaranteePairs(ix: number, G: number): GuaranteePairResult[] {
+    const { subs, slotKey, rollsLeft } = this.artifacts[ix]
+    const N = rollsLeft - (subs.length < 4 ? 1 : 0)
+    if (subs.length !== 4 || N <= 0) return []
+
+    const Gclamped = Math.min(G, N)
+
+    // Evaluate at expected-upgrade stats (same baseline as _calcFast)
+    const stats = { ...this.artifacts[ix].values }
+    subs.forEach((subKey) => {
+      stats[subKey] += up_rv_mean * (N / 4) * scale(subKey)
+    })
+    const { v: baseV, grads } = this.eval(stats, slotKey)[0]
+
+    // k_i = gradient contribution per one roll's expected value for substat i
+    const ks = subs.map(
+      (sub) => grads[allSubstatKeys.indexOf(sub)] * scale(sub)
+    )
+    const kSum = ks.reduce((a, b) => a + b, 0)
+    const kSum2 = ks.reduce((a, b) => a + b * b, 0)
+    // Variance of the N-G random rolls (same formula as _calcFast)
+    const sig2Random = (Q * kSum2 - W * kSum ** 2) * (N - Gclamped)
+
+    const results: GuaranteePairResult[] = []
+    for (let i = 0; i < subs.length; i++) {
+      for (let j = i + 1; j < subs.length; j++) {
+        const pairScore = ks[i] + ks[j]
+        // Extra mean: up_rv_mean * (G/4) * (k_pair - k_rest)
+        //           = up_rv_mean * (G/4) * (2*pairScore - kSum)
+        const extraAvg = up_rv_mean * (Gclamped / 4) * (2 * pairScore - kSum)
+        const mu = baseV + extraAvg
+
+        // Variance of the G guaranteed rolls split 50/50 between i and j.
+        // Each roll: E[k²] = (k_i²+k_j²)/2, E[RV²] = 4Q, E[k]² = ((k_i+k_j)/2)², E[RV]² = 16W
+        const ki = ks[i],
+          kj = ks[j]
+        const sig2Guaranteed =
+          Gclamped * (2 * Q * (ki * ki + kj * kj) - 4 * W * (ki + kj) ** 2)
+        const sig2 = sig2Random + sig2Guaranteed
+
+        const { p, upAvg } = gaussianPE(mu, sig2, this.thresholds[0])
+        results.push({ pair: [subs[i], subs[j]], extraAvg, pairScore, p, upAvg })
+      }
+    }
+    results.sort((a, b) => b.pairScore - a.pairScore)
+    return results
   }
 
   /* ICachedArtifact to ArtifactBuildData. */

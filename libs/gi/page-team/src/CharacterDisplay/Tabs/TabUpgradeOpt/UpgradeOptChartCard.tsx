@@ -16,13 +16,24 @@ import {
 import {
   ArtifactCard,
   ArtifactCardPico,
+  ArtifactColoredIconStatWithUnit,
   DataContext,
   EquipBuildModal,
 } from '@genshin-optimizer/gi/ui'
 import { uiInput as input } from '@genshin-optimizer/gi/wr'
 import CheckroomIcon from '@mui/icons-material/Checkroom'
-import { Box, Button, Divider, Grid, Tooltip, Typography } from '@mui/material'
-import { useCallback, useContext, useEffect, useMemo } from 'react'
+import {
+  Box,
+  Button,
+  CardContent,
+  Divider,
+  Grid,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+  Typography,
+} from '@mui/material'
+import { useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Area,
@@ -36,7 +47,7 @@ import {
   YAxis,
 } from 'recharts'
 import { erf } from './mathUtil'
-import type { UpOptCalculator } from './upOpt'
+import type { GuaranteePairResult, UpOptCalculator } from './upOpt'
 import { ResultType } from './upOpt'
 
 type Props = {
@@ -264,6 +275,14 @@ function UpgradeOptChartCardGraph({
             )}
           </Box>
 
+          {upArt.isOffSetWarning && (
+            <Tooltip
+              title="Evaluated as if it were part of the 4-set. Equipping it directly would break the set bonus — you would need to also move the current off-piece to a different slot (2-swap)."
+              placement="top"
+            >
+              <SqBadge color="warning">⚠ Off-set</SqBadge>
+            </Tooltip>
+          )}
           <Typography>{probUpgradeText}</Typography>
           <Typography>{avgIncText}</Typography>
         </Box>
@@ -377,7 +396,117 @@ function UpgradeOptChartCardGraph({
           />
         </ComposedChart>
       </ResponsiveContainer>
+      <GuaranteePairSection upOptCalc={upOptCalc} ix={ix} thr0={thr0} />
     </CardThemed>
+  )
+}
+
+function GuaranteePairSection({
+  upOptCalc,
+  ix,
+  thr0,
+}: {
+  upOptCalc: UpOptCalculator
+  ix: number
+  thr0: number
+}) {
+  const [G, setG] = useState(2)
+
+  const top2: GuaranteePairResult[] = useMemo(
+    () => upOptCalc.calcGuaranteePairs(ix, G).slice(0, 2),
+    [upOptCalc, ix, G]
+  )
+
+  if (top2.length === 0) return null
+
+  return (
+    <>
+      <Divider />
+      <CardContent sx={{ pt: 1, pb: '8px !important' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+          <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>
+            Best Guarantee Pairs
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            Guaranteed rolls:
+          </Typography>
+          <ToggleButtonGroup
+            value={G}
+            exclusive
+            size="small"
+            onChange={(_, v) => v !== null && setG(v)}
+          >
+            <ToggleButton value={2}>2</ToggleButton>
+            <ToggleButton value={3}>3</ToggleButton>
+            <ToggleButton value={4}>4</ToggleButton>
+          </ToggleButtonGroup>
+        </Box>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+          {top2.map(({ pair, extraAvg, p, upAvg }, idx) => {
+            const extraPct = (100 * extraAvg) / thr0
+            const upAvgPct = (100 * upAvg) / thr0
+            return (
+              <Box
+                key={pair.join('+')}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1,
+                  borderRadius: 1,
+                  px: 1,
+                  py: 0.5,
+                  bgcolor: idx === 0 ? 'success.dark' : 'action.hover',
+                  opacity: idx === 0 ? 1 : 0.85,
+                }}
+              >
+                <SqBadge color={idx === 0 ? 'success' : 'info'}>
+                  #{idx + 1}
+                </SqBadge>
+                <Box
+                  sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexGrow: 1 }}
+                >
+                  <ArtifactColoredIconStatWithUnit statKey={pair[0]} />
+                  <Typography variant="body2">&amp;</Typography>
+                  <ArtifactColoredIconStatWithUnit statKey={pair[1]} />
+                </Box>
+                <Tooltip
+                  title="Probability this artifact improves your build after upgrading with this guarantee"
+                  placement="top"
+                >
+                  <Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>
+                    <strong>{(100 * p).toFixed(1)}%</strong>
+                    <Typography component="span" variant="caption" color="text.secondary">
+                      {' '}prob
+                    </Typography>
+                  </Typography>
+                </Tooltip>
+                <Tooltip
+                  title={`Expected avg gain if it improves. Extra from guarantee: ${extraPct >= 0 ? '+' : ''}${extraPct.toFixed(2)}%`}
+                  placement="top"
+                >
+                  <Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>
+                    <strong>
+                      {upAvgPct > 0 ? '+' : ''}
+                      {upAvgPct.toFixed(1)}%
+                    </strong>
+                    <Typography component="span" variant="caption" color="text.secondary">
+                      {' '}avg
+                    </Typography>
+                  </Typography>
+                </Tooltip>
+              </Box>
+            )
+          })}
+        </Box>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ mt: 0.75, display: 'block' }}
+        >
+          Hover avg for extra gain from guarantee vs. random
+        </Typography>
+      </CardContent>
+    </>
   )
 }
 
